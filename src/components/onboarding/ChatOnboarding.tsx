@@ -6,6 +6,7 @@ import { ProfileData, defaultProfile } from "@/lib/types";
 import { formatINR, parseINR } from "@/lib/format";
 import { Sparkles, User as UserIcon, Check, Minus, Plus, ArrowLeft } from "lucide-react";
 import { Language, LANGUAGES, Strings, t } from "@/lib/translations";
+import { createClient, isSupabaseConfigured } from "@/lib/supabase/client";
 
 interface Liability {
   name: string;
@@ -38,6 +39,10 @@ interface Step {
   suffix?: string;
   placeholder?: string;
   initial?: (d: ProfileData) => number;
+  prefill?: (d: ProfileData) => string;
+  digitsOnly?: boolean;
+  maxLength?: number;
+  validate?: (v: string) => string | null; // returns an error message, or null if valid
   skippable?: boolean;
   showIf?: (d: ProfileData) => boolean;
   apply: (d: ProfileData, value: AnswerValue) => Partial<ProfileData>;
@@ -54,9 +59,30 @@ function buildSteps(s: Strings): Step[] {
       type: "text",
       skippable: true,
       placeholder: s.nameInputPlaceholder,
+      prefill: (d) => d.fullName ?? "",
       question: () => s.greetingForName,
       apply: (_d, v) => ({ fullName: String(v).trim() }),
       answerLabel: (v) => (String(v).trim() ? String(v).trim() : s.answerNameSkipped),
+    },
+    {
+      id: "phone",
+      type: "text",
+      digitsOnly: true,
+      maxLength: 10,
+      validate: (v) => (/^\d{10}$/.test(v) ? null : "Please enter a valid 10-digit mobile number."),
+      placeholder: "10-digit mobile number",
+      question: (d) => `${firstName(d.fullName) ? `Thanks, ${firstName(d.fullName)}! ` : ""}What's the best phone number to reach you on?`,
+      apply: (_d, v) => ({ phone: String(v).trim() }),
+      answerLabel: (v) => String(v).trim(),
+    },
+    {
+      id: "company",
+      type: "text",
+      skippable: true,
+      placeholder: "Company name (optional)",
+      question: () => "Which company do you work for, or did you retire from?",
+      apply: (_d, v) => ({ companyName: String(v).trim() }),
+      answerLabel: (v) => (String(v).trim() ? String(v).trim() : "Skipped"),
     },
     {
       id: "age",
@@ -156,14 +182,18 @@ function buildSteps(s: Strings): Step[] {
       id: "desired",
       type: "money",
       question: () => s.desiredIncomeQuestion,
+      min: 1000,
       presets: [
-        { label: "₹30,000", value: 30_000 },
         { label: "₹50,000", value: 50_000 },
-        { label: "₹75,000", value: 75_000 },
         { label: "₹1 L", value: 1_00_000 },
+        { label: "₹1.5 L", value: 1_50_000 },
+        { label: "₹2 L", value: 2_00_000 },
       ],
-      apply: (_d, v) => ({ desiredMonthlyIncome: Number(v) }),
-      answerLabel: (v) => `${formatINR(Number(v))} / mo`,
+      apply: (_d, v) => {
+        const n = Number(v);
+        return { desiredMonthlyIncome: Number.isFinite(n) && n >= 1000 ? n : _d.desiredMonthlyIncome };
+      },
+      answerLabel: (v) => `${formatINR(Number(v) || 0)} / mo`,
     },
     {
       id: "risk",
@@ -187,20 +217,6 @@ function buildSteps(s: Strings): Step[] {
       ],
       apply: (_d, v) => ({ hasHealthInsurance: v === "yes" }),
       answerLabel: (v) => (v === "yes" ? s.answerHealthYes : s.answerHealthNo),
-    },
-    {
-      id: "healthCover",
-      type: "money",
-      showIf: (d) => d.hasHealthInsurance,
-      question: () => s.healthCoverQuestion,
-      presets: [
-        { label: "₹5 L", value: 5_00_000 },
-        { label: "₹10 L", value: 10_00_000 },
-        { label: "₹25 L", value: 25_00_000 },
-        { label: "₹50 L", value: 50_00_000 },
-      ],
-      apply: (_d, v) => ({ healthCover: Number(v) }),
-      answerLabel: (v) => formatINR(Number(v), { compact: true }),
     },
     {
       // EPS pension — fixed monthly amount; locked to the EPS member (usually husband).
@@ -246,14 +262,35 @@ export function ChatOnboarding() {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const endRef = useRef<HTMLDivElement>(null);
+  const questionRef = useRef<HTMLDivElement>(null);
 
   const s = t(lang ?? "en");
   const STEPS = buildSteps(s);
   const step = STEPS[idx];
 
+  // Pre-fill the name from the signed-in Google account (less typing for users).
   useEffect(() => {
-    endRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [transcript, idx, submitting, lang]);
+    if (!isSupabaseConfigured) return;
+    const supabase = createClient();
+    supabase.auth.getUser().then(({ data: { user } }) => {
+      const name =
+        (user?.user_metadata?.full_name as string) ||
+        (user?.user_metadata?.name as string) ||
+        "";
+      if (name) setData((d) => (d.fullName ? d : { ...d, fullName: name }));
+    });
+  }, []);
+
+  useEffect(() => {
+    // While building the plan, scroll to the spinner at the bottom.
+    // Otherwise scroll so the CURRENT QUESTION sits at the top — the user
+    // reads the question first, then the options below it.
+    if (submitting) {
+      endRef.current?.scrollIntoView({ behavior: "smooth" });
+    } else {
+      questionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+  }, [idx, submitting, lang]);
 
   const nextVisibleIndex = (from: number, d: ProfileData): number => {
     let i = from;
@@ -361,12 +398,12 @@ export function ChatOnboarding() {
         ))}
 
         {!submitting && (
-          <>
+          <div ref={questionRef} className="space-y-5 scroll-mt-32">
             <Bubble role="bot" text={step.question(data)} />
             <div className="pl-12 animate-fade-in">
               <StepInput key={step.id} step={step} data={data} onAnswer={handleAnswer} strings={s} />
             </div>
-          </>
+          </div>
         )}
 
         {submitting && (
@@ -457,7 +494,7 @@ function StepInput({
   onAnswer: (v: AnswerValue) => void;
   strings: Strings;
 }) {
-  if (step.type === "text") return <TextInput step={step} onAnswer={onAnswer} strings={strings} />;
+  if (step.type === "text") return <TextInput step={step} data={data} onAnswer={onAnswer} strings={strings} />;
   if (step.type === "stepper") return <StepperInput step={step} data={data} onAnswer={onAnswer} strings={strings} />;
   if (step.type === "choice") return <ChoiceInput step={step} onAnswer={onAnswer} />;
   if (step.type === "money") return <MoneyInput step={step} onAnswer={onAnswer} strings={strings} />;
@@ -469,12 +506,26 @@ function StepInput({
 const BIG_BTN =
   "w-full text-left rounded-2xl border-2 px-5 py-4 text-lg font-medium transition-all border-slate-200 bg-white hover:border-primary hover:bg-primary-light active:scale-[0.99]";
 
-function TextInput({ step, onAnswer, strings }: { step: Step; onAnswer: (v: AnswerValue) => void; strings: Strings }) {
-  const [value, setValue] = useState("");
+function TextInput({ step, data, onAnswer, strings }: { step: Step; data: ProfileData; onAnswer: (v: AnswerValue) => void; strings: Strings }) {
+  const [value, setValue] = useState(step.prefill ? step.prefill(data) : "");
+  const [touched, setTouched] = useState(false);
+  const error = step.validate ? step.validate(value) : null;
+
+  const handleChange = (raw: string) => {
+    let v = raw;
+    if (step.digitsOnly) v = v.replace(/\D/g, "");
+    if (step.maxLength) v = v.slice(0, step.maxLength);
+    setValue(v);
+  };
+
   return (
     <form
       onSubmit={(e) => {
         e.preventDefault();
+        if (error) {
+          setTouched(true);
+          return;
+        }
         onAnswer(value);
       }}
       className="space-y-3"
@@ -482,13 +533,22 @@ function TextInput({ step, onAnswer, strings }: { step: Step; onAnswer: (v: Answ
       <input
         autoFocus
         type="text"
+        inputMode={step.digitsOnly ? "numeric" : "text"}
         value={value}
-        onChange={(e) => setValue(e.target.value)}
+        onChange={(e) => handleChange(e.target.value)}
+        onBlur={() => setTouched(true)}
         placeholder={step.placeholder}
-        className="w-full rounded-2xl border-2 border-slate-300 px-5 py-4 text-lg focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent"
+        className={`w-full rounded-2xl border-2 px-5 py-4 text-lg focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent ${
+          touched && error ? "border-red-400" : "border-slate-300"
+        }`}
       />
+      {touched && error && <p className="text-sm text-red-600 px-1">{error}</p>}
       <div className="flex gap-3">
-        <button type="submit" className="flex-1 bg-primary hover:bg-primary-hover text-white font-semibold rounded-2xl px-6 py-4 text-lg transition-colors">
+        <button
+          type="submit"
+          disabled={!!error}
+          className="flex-1 bg-primary hover:bg-primary-hover disabled:opacity-50 disabled:cursor-not-allowed text-white font-semibold rounded-2xl px-6 py-4 text-lg transition-colors"
+        >
           {strings.continueBtn}
         </button>
         {step.skippable && (
@@ -542,6 +602,8 @@ function ChoiceInput({ step, onAnswer }: { step: Step; onAnswer: (v: AnswerValue
 function MoneyInput({ step, onAnswer, strings }: { step: Step; onAnswer: (v: AnswerValue) => void; strings: Strings }) {
   const [custom, setCustom] = useState(false);
   const [amount, setAmount] = useState("");
+  const [err, setErr] = useState<string | null>(null);
+  const minVal = step.min ?? 0;
 
   if (custom) {
     return (
@@ -549,6 +611,10 @@ function MoneyInput({ step, onAnswer, strings }: { step: Step; onAnswer: (v: Ans
         onSubmit={(e) => {
           e.preventDefault();
           const n = parseINR(amount);
+          if (minVal > 0 && n < minVal) {
+            setErr(`Please enter at least ${formatINR(minVal)} per month. Tip: for ₹2.5 lakh, type "250000" or "2.5L".`);
+            return;
+          }
           if (n > 0 || amount.trim() === "0") onAnswer(n);
         }}
         className="space-y-3"
@@ -560,16 +626,17 @@ function MoneyInput({ step, onAnswer, strings }: { step: Step; onAnswer: (v: Ans
             type="text"
             inputMode="numeric"
             value={amount}
-            onChange={(e) => setAmount(e.target.value)}
+            onChange={(e) => { setAmount(e.target.value); setErr(null); }}
             placeholder={strings.enterAmountPlaceholder}
             className="w-full rounded-2xl border-2 border-slate-300 pl-10 pr-5 py-4 text-lg focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent"
           />
           {parseINR(amount) > 0 && (
-            <span className="absolute right-5 top-1/2 -translate-y-1/2 text-sm text-slate-400">
-              {formatINR(parseINR(amount), { compact: true })}
+            <span className="absolute right-5 top-1/2 -translate-y-1/2 text-base font-bold text-primary">
+              = {formatINR(parseINR(amount))}
             </span>
           )}
         </div>
+        {err && <p className="text-sm text-red-600 font-medium">{err}</p>}
         <p className="text-sm text-slate-500">{strings.amountTip}</p>
         <div className="flex gap-3">
           <button type="submit" className="flex-1 bg-primary hover:bg-primary-hover text-white font-semibold rounded-2xl px-6 py-4 text-lg transition-colors">

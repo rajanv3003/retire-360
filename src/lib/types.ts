@@ -4,6 +4,8 @@ import { z } from "zod";
 export const profileSchema = z.object({
   // Step 1
   fullName: z.string().optional(),
+  phone: z.string().optional(),
+  companyName: z.string().optional(),
   age: z.number().min(40).max(95),
   gender: z.enum(["male", "female", "other"]),
   maritalStatus: z.enum(["single", "married", "widowed", "divorced"]),
@@ -37,8 +39,11 @@ export const profileSchema = z.object({
   hasHealthInsurance: z.boolean(),
   healthCover: z.number().min(0),
 
-  // Step 3
-  desiredMonthlyIncome: z.number().min(1000),
+  // Step 3 — tolerate strings / null / NaN (default to a sensible value rather than 500-erroring)
+  desiredMonthlyIncome: z.preprocess((v) => {
+    const n = typeof v === "string" ? Number(v.replace(/[^\d.]/g, "")) : Number(v);
+    return Number.isFinite(n) && n >= 1000 ? n : 80000;
+  }, z.number().min(1000)),
   expenseHousing: z.number().min(0),
   expenseFood: z.number().min(0),
   expenseMedical: z.number().min(0),
@@ -69,6 +74,8 @@ export type ProfileData = z.infer<typeof profileSchema>;
 
 export const defaultProfile: ProfileData = {
   fullName: "",
+  phone: "",
+  companyName: "",
   age: 60,
   gender: "male",
   maritalStatus: "married",
@@ -103,7 +110,7 @@ export const defaultProfile: ProfileData = {
   inflationRate: 6,
 
   riskAppetite: "moderate",
-  planningHorizon: 25,
+  planningHorizon: 30,
   legacyAmount: 0,
   bucketListGoals: [],
 
